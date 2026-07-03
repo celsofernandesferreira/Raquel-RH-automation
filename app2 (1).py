@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 import openpyxl
 import pandas as pd
+import unicodedata
 
 # ============================================================
 # 1. CONFIGURAÇÃO DE LOGS
@@ -132,22 +133,37 @@ def extrair_dados_com_gemini(texto_notas, mapeamento_campos):
 # ============================================================
 # 6. LOCALIZAÇÃO DO CABEÇALHO E ESCRITA NO EXCEL
 # ============================================================
+def normalizar(texto):
+    """Remove acentos, espaços extra e diferenças de maiúsculas/minúsculas
+    para permitir comparações fiáveis entre nomes de colunas."""
+    if texto is None:
+        return ""
+    texto = str(texto).strip().lower()
+    texto = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii")
+    texto = re.sub(r"\s+", " ", texto)
+    return texto
+
+
 def encontrar_cabecalho(ws, colunas_alvo, limite_linhas=50):
-    """Procura a linha de cabeçalho e devolve (linha, mapa_nome->coluna)."""
+    """Procura a linha de cabeçalho e devolve (linha, mapa_nome_alvo->coluna).
+    A comparação é feita de forma normalizada (ignora acentos/maiúsculas/espaços),
+    mas o mapa devolvido usa sempre o nome EXATO fornecido pelo utilizador como chave."""
+    colunas_alvo_norm = {normalizar(c): c for c in colunas_alvo}
+
     for r in range(1, min(limite_linhas, ws.max_row) + 1):
-        valores_linha = []
+        valores_linha_norm = []
         for c in range(1, ws.max_column + 1):
             cell = ws.cell(row=r, column=c)
-            val = str(cell.value).strip() if cell.value is not None else ""
-            valores_linha.append(val)
+            valores_linha_norm.append(normalizar(cell.value))
 
-        if any(campo in valores_linha for campo in colunas_alvo):
+        if any(cn in valores_linha_norm for cn in colunas_alvo_norm.keys()):
             mapa = {}
             for c in range(1, ws.max_column + 1):
                 cell = ws.cell(row=r, column=c)
-                nome_celula = str(cell.value).strip() if cell.value is not None else ""
-                if nome_celula in colunas_alvo:
-                    mapa[nome_celula] = c
+                nome_celula_norm = normalizar(cell.value)
+                if nome_celula_norm in colunas_alvo_norm:
+                    nome_original_utilizador = colunas_alvo_norm[nome_celula_norm]
+                    mapa[nome_original_utilizador] = c
             return r, mapa
 
     return None, {}
@@ -160,10 +176,21 @@ def preencher_excel(excel_bytes, lista_dados, colunas_alvo):
     linha_cabecalho, mapa_colunas_index = encontrar_cabecalho(ws, colunas_alvo)
 
     if not mapa_colunas_index:
-        # Fallback: assume que as colunas seguem a ordem indicada pelo utilizador a partir da coluna A
-        linha_cabecalho = 1
-        mapa_colunas_index = {nome: idx for idx, nome in enumerate(colunas_alvo, start=1)}
-        logging.warning("Cabeçalho não encontrado automaticamente; a usar mapeamento por ordem das colunas.")
+        # Não arriscamos escrever "às cegas" por ordem de coluna, pois isso é o que
+        # estava a fazer os dados aparecerem em colunas erradas / no fundo do ficheiro.
+        # É preferível parar e avisar claramente do que corromper o Excel da empresa.
+        raise ValueError(
+            "Não foi possível encontrar nenhuma das colunas indicadas no cabeçalho do Excel. "
+            "Verifica se os nomes em 'Colunas do Excel original' correspondem aos nomes reais "
+            "das colunas no ficheiro (revê o painel de diagnóstico acima)."
+        )
+
+    if len(mapa_colunas_index) < len(colunas_alvo):
+        colunas_nao_encontradas = [c for c in colunas_alvo if c not in mapa_colunas_index]
+        st.warning(
+            f"⚠️ Estas colunas não foram encontradas no cabeçalho e ficarão vazias: "
+            f"{', '.join(colunas_nao_encontradas)}"
+        )
 
     # Descobre a próxima linha vazia, saltando células fundidas
     proxima_linha = linha_cabecalho + 1
@@ -180,6 +207,10 @@ def preencher_excel(excel_bytes, lista_dados, colunas_alvo):
 
     linhas_inseridas = 0
     for registo in lista_dados:
+        # Normaliza as chaves do registo (a IA ou a edição manual podem devolver
+        # nomes ligeiramente diferentes em maiúsculas/acentos/espaços)
+        registo_norm = {normalizar(k): v for k, v in registo.items()}
+
         # Salta linhas cuja interseção caia numa MergedCell secundária
         tentativas = 0
         while any(
@@ -192,7 +223,9 @@ def preencher_excel(excel_bytes, lista_dados, colunas_alvo):
                 raise RuntimeError("Não foi possível encontrar linhas livres no Excel (demasiadas células fundidas).")
 
         for nome_campo, num_coluna in mapa_colunas_index.items():
-            valor_final = registo.get(nome_campo, "")
+            valor_final = registo_norm.get(normalizar(nome_campo), "")
+            if valor_final is None or (isinstance(valor_final, float) and pd.isna(valor_final)):
+                valor_final = ""
             cell = ws.cell(row=proxima_linha, column=num_coluna)
             if type(cell).__name__ != "MergedCell":
                 cell.value = valor_final
@@ -238,6 +271,37 @@ with col2:
     )
     campos_predefinidos = "Nome, Data, Ocorrência, Detalhes"
     campos_usuario = st.text_input("Colunas do Excel original:", value=campos_predefinidos)
+
+    # Diagnóstico: mostra logo se as colunas indicadas foram encontradas no Excel,
+    # ANTES de gastar uma chamada à IA ou de escrever fosse o que fosse.
+    if excel_modelo and campos_usuario.strip():
+        try:
+            excel_modelo.seek(0)
+            wb_check = openpyxl.load_workbook(io.BytesIO(excel_modelo.read()), data_only=True)
+            ws_check = wb_check.active
+            colunas_alvo_check = [c.strip() for c in campos_usuario.split(",") if c.strip()]
+            linha_check, mapa_check = encontrar_cabecalho(ws_check, colunas_alvo_check)
+
+            if mapa_check and len(mapa_check) == len(colunas_alvo_check):
+                st.success(f"✅ Cabeçalho encontrado na linha {linha_check}. Todas as colunas foram reconhecidas.")
+                with st.expander("Ver mapeamento detetado"):
+                    for nome, col in mapa_check.items():
+                        st.write(f"**{nome}** → coluna {openpyxl.utils.get_column_letter(col)}")
+            elif mapa_check:
+                encontradas = list(mapa_check.keys())
+                em_falta = [c for c in colunas_alvo_check if c not in encontradas]
+                st.warning(
+                    f"⚠️ Só foram reconhecidas {len(encontradas)} de {len(colunas_alvo_check)} colunas "
+                    f"(linha {linha_check}). Em falta: {', '.join(em_falta)}. "
+                    "Verifica se os nomes correspondem exatamente ao cabeçalho do Excel."
+                )
+            else:
+                st.error(
+                    "❌ Nenhuma das colunas indicadas foi encontrada no cabeçalho do Excel. "
+                    "Confirma os nomes das colunas (revê o ficheiro carregado)."
+                )
+        except Exception as e:
+            st.warning(f"Não foi possível pré-validar o Excel: {e}")
 
 st.divider()
 
