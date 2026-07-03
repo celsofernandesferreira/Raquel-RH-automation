@@ -36,51 +36,37 @@ def ler_ficheiro_docx(uploaded_file):
     doc = docx.Document(io.BytesIO(uploaded_file.read()))
     return "\n".join([para.text for para in doc.paragraphs])
 
-# 4. AGENTE DE INTELIGÊNCIA ARTIFICIAL (Com Esquema Estruturado Universal)
+# 4. AGENTE DE INTELIGÊNCIA ARTIFICIAL (Compatível com Versões Antigas)
 def extrair_dados_com_gemini(texto_notas, mapeamento_campos):
-    colunas_alvo = [c.strip() for c in mapeamento_campos.split(",")]
-    propriedades_json = {campo: {"type": "STRING"} for campo in colunas_alvo}
+    # Usamos o modelo estável gemini-pro que funciona em qualquer versão da SDK
+    model = genai.GenerativeModel(model_name="gemini-pro")
     
-    esquema_resposta = {
-        "type": "ARRAY",
-        "items": {
-            "type": "OBJECT",
-            "properties": propiedades_json,
-            "required": colunas_alvo
-        }
-    }
-
-    # Correção do Erro 404: Tenta usar a nomenclatura universal estável 'gemini-pro' 
-    # ou garante retrocompatibilidade se a biblioteca for mais antiga.
-    try:
-        model = genai.GenerativeModel(
-            model_name="gemini-pro", 
-            generation_config={
-                "response_mime_type": "application/json",
-                "response_schema": esquema_resposta
-            }
-        )
-    except Exception:
-        # Fallback caso a versão do pacote exija a string com o prefixo herdado
-        model = genai.GenerativeModel(model_name="gemini-pro")
-
     prompt_sistema = f"""
-    Tu és um Assistente de RH Avançado especialista em extração de dados estruturados. 
-    O teu objetivo exclusivo é ler as notas fornecidas e extrair as informações relevantes para preencher a tabela.
+    Tu és um Assistente de RH Avançado especialista em extração de dados estruturados.
+    O teu objetivo é ler as notas fornecidas e extrair os dados necessários para preencher uma tabela corporativa.
     
-    Regras estritas:
-    1. Retorna APENAS um array JSON válido de objetos com os campos solicitados.
-    2. Se a informação para algum dos campos não existir nas notas, deixa o valor como string vazia "".
-    3. Nunca inventes dados.
+    Deves mapear as informações estritamente para as seguintes colunas fornecidas pelo utilizador:
+    {mapeamento_campos}
+    
+    Regras estritas de resposta:
+    1. Responde APENAS com um array JSON válido contendo objetos. Cada objeto representa uma linha a introduzir no Excel.
+    2. Usa exatamente o nome dos campos fornecidos como chaves do JSON (ex: "Nome", "Data", "Ocorrência", "Detalhes").
+    3. Se a informação não existir nas notas para alguma das chaves, deixa o valor vazio "".
+    4. NÃO adiciones nenhuma introdução, explicação ou texto fora do array JSON.
     """
     
     try:
         response = model.generate_content([prompt_sistema, f"Notas para analisar:\n\n{texto_notas}"])
-        # Limpeza robusta de markdown caso o modelo não suporte o parâmetro response_schema de forma nativa
-        json_clean = response.text.strip()
-        if "```json" in json_clean:
-            json_clean = re.sub(r"```json|```", "", json_clean).strip()
-        return json.loads(json_clean)
+        
+        # Limpeza robusta do texto retornado para isolar o JSON
+        texto_resposta = response.text.strip()
+        
+        # Remove blocos de código Markdown se o modelo os incluir por hábito
+        if "```" in texto_resposta:
+            # Captura tudo o que estiver entre os parágrafos de JSON, ou limpa os marcadores
+            texto_resposta = re.sub(r"```json|```", "", texto_resposta).strip()
+            
+        return json.loads(texto_resposta)
     except Exception as e:
         logging.error(f"Erro na extração do Agente: {e}")
         st.sidebar.error(f"Detalhe do erro do Gemini: {e}")
@@ -140,7 +126,6 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                         valores_linha = []
                         for c in range(1, ws.max_column + 1):
                             cell = ws.cell(row=r, column=c)
-                            # Se for uma célula fundida (MergedCell), ignoramos o erro de leitura
                             val = str(cell.value).strip() if cell.value is not None else ""
                             valores_linha.append(val)
                         
@@ -163,7 +148,6 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                         linha_vazia = True
                         for c in range(1, ws.max_column + 1):
                             cell = ws.cell(row=proxima_linha, column=c)
-                            # Verifica se o tipo do objeto é MergedCell ou tem valor
                             if type(cell).__name__ == "MergedCell" or cell.value is not None:
                                 linha_vazia = False
                                 break
@@ -171,18 +155,17 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                             break
                         proxima_linha += 1
                     
-                    # 3. Inserir os dados protegendo contra escrita em células bloqueadas/fundidas
+                    # 3. Inserir os dados protegendo contra escrita em células fundidas (Read-Only)
                     linhas_inseridas = 0
                     for registo in lista_dados:
-                        # Certifica que saltamos qualquer MergedCell residual para evitar o erro "read-only"
-                        while any(type(ws.cell(row=proxima_linha, column=num_col)).name == "MergedCell" for num_col in mapa_colunas_index.values()):
+                        # Ignora linhas que pertençam a uma MergedCell secundária
+                        while any(type(ws.cell(row=proxima_linha, column=num_col)).__name__ == "MergedCell" for num_col in mapa_colunas_index.values()):
                             proxima_linha += 1
 
                         for nome_campo, num_coluna in mapa_colunas_index.items():
                             valor_final = registo.get(nome_campo, "")
                             cell = ws.cell(row=proxima_linha, column=num_coluna)
                             
-                            # Só escreve se NÃO for uma célula fundida secundária
                             if type(cell).__name__ != "MergedCell":
                                 cell.value = valor_final
                                 
@@ -207,4 +190,4 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                     st.error(f"Erro ao manipular o ficheiro Excel: {ex}")
                     logging.error(f"Erro na manipulação de openpyxl: {ex}")
             else:
-                st.error("Não foi possível extrair dados válidos. Verifica a barra lateral para ver o detalhe do erro.")
+                st.error("Não foi possível extrair dados válidos. Verifica se o texto enviado contém dados claros ou consulta os logs.")
