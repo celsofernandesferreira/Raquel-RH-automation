@@ -7,6 +7,7 @@ import docx
 import logging
 from datetime import datetime
 import openpyxl
+from openpyxl.styles import Alignment
 import pandas as pd
 
 # ============================================================
@@ -41,21 +42,21 @@ def ler_ficheiro_docx(uploaded_file):
     return "\n".join([para.text for para in doc.paragraphs])
 
 # ============================================================
-# 3. MAPEAMENTO DO FORMULÁRIO (NOVA LÓGICA VERTICAL)
+# 3. MAPEAMENTO DO FORMULÁRIO (LÓGICA VERTICAL INTELIGENTE)
 # ============================================================
 def ler_estrutura_formulario(excel_bytes):
-    """Lê o formulário vertical e regista a posição de todos os campos (rótulos)."""
+    """Lê o formulário vertical e regista a posição de todos os campos (perguntas)."""
     wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
     ws = wb.active
     
     mapa_campos = {}
     
-    # Percorre as linhas do Excel (ex: até à linha 50) e as colunas A e B
+    # Percorre as linhas do Excel onde costumam estar as perguntas (ex: 1 a 50)
     for r in range(1, 50):
         for c in range(1, 3): 
             val = ws.cell(row=r, column=c).value
             if val and isinstance(val, str) and len(val.strip()) > 2:
-                # Evita apanhar títulos de secção que costumam ter números (ex: "1. Background")
+                # Evita apanhar os cabeçalhos de secção numéricos (ex: "1. Background")
                 if not re.match(r"^\d\.", val.strip()): 
                     mapa_campos[val.strip()] = {"row": r, "col": c}
                     
@@ -73,16 +74,16 @@ def extrair_dados_formulario_com_gemini(texto_notas, campos_disponiveis):
     Tu és um Assistente de RH encarregue de preencher formulários de avaliação de entrevistas.
     Abaixo tens as notas soltas tiradas durante uma entrevista.
     
-    O formulário Excel que tens de preencher tem exatamente os seguintes campos:
+    O formulário Excel que tens de preencher tem exatamente as seguintes perguntas/campos:
     {lista_campos}
     
     O teu objetivo:
     - Extrai a informação do texto e mapeia para os campos corretos.
     - Se não existir informação nas notas para um determinado campo, deixa o valor vazio "".
-    - Resume as informações de forma profissional, mantendo os detalhes técnicos.
+    - Resume as informações de forma profissional.
     
     MUITO IMPORTANTE:
-    Responde APENAS com um ÚNICO objeto JSON (e não uma lista/array). As chaves do JSON têm de ser EXATAMENTE as que listei acima.
+    Responde APENAS com um ÚNICO objeto JSON (e não uma lista/array). As chaves do JSON têm de ser EXATAMENTE os nomes dos campos que listei acima.
     """
 
     try:
@@ -101,8 +102,16 @@ def extrair_dados_formulario_com_gemini(texto_notas, campos_disponiveis):
         return None
 
 # ============================================================
-# 5. ESCRITA NO FORMULÁRIO EXCEL
+# 5. ESCRITA NO FORMULÁRIO EXCEL AO LADO DA PERGUNTA
 # ============================================================
+def obter_coluna_destino(ws, linha, coluna_rotulo):
+    """Encontra a próxima caixa de texto à direita que não faça parte de uma célula fundida."""
+    for c in range(coluna_rotulo + 1, 20):
+        # Se a célula não for uma 'MergedCell' secundária, é aí que devemos escrever
+        if type(ws.cell(row=linha, column=c)).__name__ != "MergedCell":
+            return c
+    return coluna_rotulo + 1
+
 def preencher_formulario_excel(excel_bytes, dados_json, mapa_campos):
     wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
     ws = wb.active
@@ -113,11 +122,15 @@ def preencher_formulario_excel(excel_bytes, dados_json, mapa_campos):
             linha = mapa_campos[nome_campo]["row"]
             coluna_rotulo = mapa_campos[nome_campo]["col"]
             
-            # Escreve na célula imediatamente à direita do nome do campo!
-            # Exemplo: Se o rótulo está em A5, escrevemos a resposta em B5.
-            coluna_destino = coluna_rotulo + 1 
+            # Inteligência para encontrar a célula de resposta ao lado da pergunta
+            coluna_destino = obter_coluna_destino(ws, linha, coluna_rotulo)
             
-            ws.cell(row=linha, column=coluna_destino).value = valor
+            celula = ws.cell(row=linha, column=coluna_destino)
+            celula.value = str(valor)
+            
+            # Força o Excel a quebrar as linhas de texto para caber perfeitamente na caixa
+            celula.alignment = Alignment(wrapText=True, vertical='top')
+            
             campos_preenchidos += 1
 
     output_final = io.BytesIO()
@@ -144,7 +157,7 @@ with col1:
     texto_colado = st.text_area("Ou escreve/cola aqui as notas do candidato:", height=200, value=texto_acumulado)
 
 with col2:
-    st.markdown("### 📂 2. Formulário de Avaliação (Excel)")
+    st.markdown("### 📂 2. Formulário de Avaliação (Excel Original)")
     excel_modelo = st.file_uploader("Carrega o 'Interview evaluation form.xlsx'", type=["xlsx"])
     
     mapa_campos = {}
@@ -153,7 +166,7 @@ with col2:
         mapa_campos = ler_estrutura_formulario(excel_bytes_lido)
         
         if mapa_campos:
-            st.success(f"✅ Formulário reconhecido! Encontrados {len(mapa_campos)} campos.")
+            st.success(f"✅ Formulário detetado com {len(mapa_campos)} perguntas extraídas.")
         else:
             st.error("❌ Não foi possível ler a estrutura do formulário.")
 
@@ -171,19 +184,17 @@ if st.button("🤖 Analisar Notas e Preencher Formulário", use_container_width=
         if dados_extraidos:
             st.session_state.dados_extraidos = dados_extraidos
             st.session_state.excel_pronto = None 
-            st.success("✅ O rascunho do formulário foi gerado! Revê abaixo.")
+            st.success("✅ Avaliação mapeada! Revê os dados antes de os embutir no Excel.")
 
 if st.session_state.dados_extraidos:
     st.markdown("### 👀 3. Revisão do Formulário")
-    st.caption("Podes editar os dados extraídos antes de os embutir no Excel original.")
+    st.caption("Podes corrigir qualquer erro na resposta antes de a gravar no Excel.")
     
-    # Mostra os dados em forma de tabela vertical para ser fácil de rever
-    df_preview = pd.DataFrame(list(st.session_state.dados_extraidos.items()), columns=["Campo do Formulário", "Valor a Inserir"])
+    df_preview = pd.DataFrame(list(st.session_state.dados_extraidos.items()), columns=["Campo do Formulário", "Resposta a Inserir"])
     df_editado = st.data_editor(df_preview, use_container_width=True, hide_index=True)
 
     if st.button("📥 Embutir Dados e Gerar Novo Excel", use_container_width=True, type="primary"):
-        # Converte a tabela editada de volta para o formato Dicionário
-        lista_dados_final = dict(zip(df_editado["Campo do Formulário"], df_editado["Valor a Inserir"]))
+        lista_dados_final = dict(zip(df_editado["Campo do Formulário"], df_editado["Resposta a Inserir"]))
         
         try:
             excel_modelo.seek(0)
@@ -193,7 +204,7 @@ if st.session_state.dados_extraidos:
 
             st.session_state.excel_pronto = output_final.getvalue()
             st.session_state.nome_ficheiro_saida = f"Candidato_Avaliado_{datetime.now().strftime('%d-%m-%Y_%H%M')}.xlsx"
-            st.success(f"✨ Sucesso! {num_inseridos} campos do formulário foram preenchidos.")
+            st.success(f"✨ Sucesso! Injetámos {num_inseridos} respostas no documento final.")
         except Exception as ex:
             st.error(f"Erro a gerar ficheiro: {ex}")
 
