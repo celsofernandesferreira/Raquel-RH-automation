@@ -39,7 +39,7 @@ def ler_ficheiro_docx(uploaded_file):
 # 4. AGENTE DE INTELIGÊNCIA ARTIFICIAL
 def extrair_dados_com_gemini(texto_notas, mapeamento_campos):
     model = genai.GenerativeModel(
-        model_name="gemini-3.5-flash",
+        model_name="gemini-1.5-flash",  # Atualizado para o nome de modelo estável e recomendado
         generation_config={"response_mime_type": "application/json"}
     )
     
@@ -109,7 +109,7 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                 try:
                     # Carregar o livro de Excel carregado em memória (preserva estilos e fórmulas)
                     wb = openpyxl.load_workbook(io.BytesIO(excel_modelo.read()))
-                    ws = wb.active # Escolhe a primeira folha (pode ser alterado para um nome específico)
+                    ws = wb.active # Escolhe a primeira folha
                     
                     # Transformar a string de campos numa lista limpa
                     colunas_alvo = [c.strip() for c in campos_usuario.split(",")]
@@ -137,11 +137,11 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                             mapa_colunas_index[nome_col] = idx
                     
                     # 2. Descobrir a próxima linha inteiramente vazia para começar a escrever dados
-                    proxima_linha = linha_cabecalho + 1
+                    proxima_linha = Henry_linha = linha_cabecalho + 1
                     while any(ws.cell(row=proxima_linha, column=c).value is not None for c in range(1, ws.max_column + 1)):
                         proxima_linha += 1
                     
-                    # 3. Inserir os dados linha a linha respeitando as colunas originais do ficheiro da Raquel
+                    # 3. Inserir os dados linha a linha respeitando as colunas originais
                     linhas_inseridas = 0
                     for registo in lista_dados:
                         for nome_campo, num_coluna in mapa_colunas_index.items():
@@ -159,7 +159,7 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                     
                     st.success(f"✨ Sucesso! Adicionámos {linhas_inseridas} novas linhas ao documento original da empresa sem alterar a estrutura existente.")
                     
-                    # Botão para sacar o ficheiro preenchido
+                    # Botão para descarregar o ficheiro preenchido
                     st.download_button(
                         label="📥 Descarregar Excel Preenchido",
                         data=output_final,
@@ -171,4 +171,6 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                 except Exception as ex:
                     st.error(f"Erro ao manipular o ficheiro Excel: {ex}")
                     logging.error(f"Erro na manipulação de openpyxl: {ex}")
-                    
+            else:
+                st.error("Não foi possível extrair dados válidos das notas fornecidas. Verifica o formato do texto ou os logs.")
+                
