@@ -36,31 +36,48 @@ def ler_ficheiro_docx(uploaded_file):
     doc = docx.Document(io.BytesIO(uploaded_file.read()))
     return "\n".join([para.text for para in doc.paragraphs])
 
-# 4. AGENTE DE INTELIGÊNCIA ARTIFICIAL
+# 4. AGENTE DE INTELIGÊNCIA ARTIFICIAL (Com Esquema Estruturado para evitar falhas)
 def extrair_dados_com_gemini(texto_notas, mapeamento_campos):
+    # Transformar os campos fornecidos numa lista para criar o esquema JSON dinâmico
+    colunas_alvo = [c.strip() for c in mapeamento_campos.split(",")]
+    
+    # Criar as propriedades do objeto JSON dinamicamente
+    propriedades_json = {campo: {"type": "STRING"} for campo in colunas_alvo}
+    
+    # Definir o esquema estrito que o Gemini TEM de seguir
+    esquema_resposta = {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": propriedades_json,
+            "required": colunas_alvo  # Garante que todas as chaves vêm no objeto
+        }
+    }
+
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",  # Atualizado para o nome de modelo estável e recomendado
-        generation_config={"response_mime_type": "application/json"}
+        model_name="gemini-1.5-flash",
+        generation_config={
+            "response_mime_type": "application/json",
+            "response_schema": esquema_resposta  # Força a API a devolver apenas o JSON limpo
+        }
     )
     
     prompt_sistema = f"""
-    Tu és um Assistente de RH Avançado. O teu objetivo é ler as notas fornecidas e extrair os dados necessários para preencher uma tabela corporativa predefinida.
+    Tu és um Assistente de RH Avançado especialista em extração de dados estruturados. 
+    O teu objetivo exclusivo é ler as notas fornecidas pelo utilizador e extrair as informações relevantes para preencher a tabela.
     
-    Deves mapear as informações estritamente para as seguintes chaves/colunas que o utilizador vai fornecer:
-    {mapeamento_campos}
-    
-    Regras:
-    1. Retorna um array JSON de objetos. Cada objeto é uma linha a introduzir no Excel.
-    2. Usa exatamente o nome dos campos fornecidos como chaves do JSON.
-    3. Se a informação não existir nas notas, deixa o valor vazio "".
+    Regras estritas:
+    1. Preenche os campos do objeto com os dados extraídos das notas.
+    2. Se a informação para algum dos campos não existir nas notas, deixa o valor como string vazia "".
+    3. Nunca inventes dados nem adiciones texto explicativo fora do formato pedido.
     """
     
     try:
         response = model.generate_content([prompt_sistema, f"Notas para analisar:\n\n{texto_notas}"])
-        json_clean = re.sub(r"```json|```", "", response.text).strip()
-        return json.loads(json_clean)
+        return json.loads(response.text)
     except Exception as e:
         logging.error(f"Erro na extração do Agente: {e}")
+        st.sidebar.error(f"Detalhe do erro do Gemini: {e}")
         return None
 
 # 5. INTERFACE DO UTILIZADOR
@@ -137,7 +154,7 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                             mapa_colunas_index[nome_col] = idx
                     
                     # 2. Descobrir a próxima linha inteiramente vazia para começar a escrever dados
-                    proxima_linha = Henry_linha = linha_cabecalho + 1
+                    proxima_linha = linha_cabecalho + 1
                     while any(ws.cell(row=proxima_linha, column=c).value is not None for c in range(1, ws.max_column + 1)):
                         proxima_linha += 1
                     
@@ -172,5 +189,5 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                     st.error(f"Erro ao manipular o ficheiro Excel: {ex}")
                     logging.error(f"Erro na manipulação de openpyxl: {ex}")
             else:
-                st.error("Não foi possível extrair dados válidos das notas fornecidas. Verifica o formato do texto ou os logs.")
+                st.error("Não foi possível extrair dados válidos das notas fornecidas. Verifica o formato do texto ou a tua chave API.")
                 
