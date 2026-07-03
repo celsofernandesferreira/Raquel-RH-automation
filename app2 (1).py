@@ -208,4 +208,3 @@ if st.button("🤖 Analisar Notas e Preencher Excel da Empresa", use_container_w
                     logging.error(f"Erro na manipulação de openpyxl: {ex}")
             else:
                 st.error("Não foi possível extrair dados válidos. Verifica a barra lateral para ver o detalhe do erro.")
-                
